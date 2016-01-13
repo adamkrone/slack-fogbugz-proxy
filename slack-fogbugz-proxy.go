@@ -1,9 +1,12 @@
 package main
 
 // Written by Kim Blomqvist <kim.blomqvist@lekane.com>
+// Modified by Adam Krone <adam.krone@thirdwavellc.com>
 
 /*
 Copyright (c) 2014 Lekane Oy. All rights reserved.
+Copyright (c) 2016 Adam Krone. All rights reserved.
+Copyright (c) 2016 Thirdwave, LLC. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
@@ -36,61 +39,121 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 )
 
-var webhookurl string
+var config Config
 
 type Message struct {
 	Text     string `json:"text"`
 	Channel  string `json:"channel"`
 	Username string `json:"username"`
-	Icon_url string `json:"icon_url"`
+	IconUrl  string `json:"icon_url"`
 }
 
-func post(text string) {
-	m := Message{text, "#support", "fogbugz", "http://www.fogcreek.com/images/fogbugz/pricing/kiwi.png"}
-	b, err := json.Marshal(m)
+type Config struct {
+	Webhook         string                 `json:"webhook"`
+	Port            string                 `json:"port"`
+	FogbugzUrl      string                 `json:"fogbugz_url"`
+	SlackUser       string                 `json:"slack_user"`
+	DefaultChannel  string                 `json:"default_channel"`
+	ChannelMappings map[string]interface{} `json:"channel_mappings"`
+}
+
+func findChannel(project_name string) string {
+	channel := config.ChannelMappings[project_name]
+	if channel == nil {
+		return config.DefaultChannel
+	} else {
+		return channel.(string)
+	}
+}
+
+func prepareMessageText(queryParams *url.Values) string {
+	message := "<" + config.FogbugzUrl + "/default.asp?" + queryParams.Get("case_number")
+	message = message + "|Case " + queryParams.Get("case_number") + ">: "
+	message = message + queryParams.Get("title")
+	return message
+}
+
+func prepareMessage(queryParams *url.Values) Message {
+	return Message{
+		Text:     prepareMessageText(queryParams),
+		Channel:  findChannel(queryParams.Get("project_name")),
+		Username: config.SlackUser,
+		IconUrl:  "http://www.fogcreek.com/images/fogbugz/pricing/kiwi.png",
+	}
+}
+
+func post(queryParams *url.Values) {
+	message := prepareMessage(queryParams)
+
+	binaryMessage, err := json.Marshal(message)
 	if err != nil {
-		fmt.Printf("ERROR '%s' marshalling message: %s\n", err, m)
+		fmt.Printf("ERROR '%s' marshalling message: %s\n", err, message)
 		return
 	}
-	fmt.Printf("Posting: %s\n", b)
-	resp, sendErr := http.Post(webhookurl, "text/json", bytes.NewReader(b))
-	defer resp.Body.Close()
-	if sendErr != nil {
+
+	fmt.Printf("Posting: %s\n", binaryMessage)
+	req, err := http.NewRequest("POST", config.Webhook, bytes.NewReader(binaryMessage))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
 		fmt.Printf("ERROR '%s' sending message\n", err)
-		return
+	}
+
+	if resp != nil {
+		defer resp.Body.Close()
 	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("-------------\n")
-	fmt.Printf("Received: %s\n", r.URL)
-	s, _ := url.QueryUnescape(r.URL.String()[1:])
-	s = strings.Replace(s, "http:/", "http://", 1)
-	fmt.Printf("Decoded as: %s\n", s)
-	post(s)
-	fmt.Printf("-------------\n")
+	queryParams := r.URL.Query()
+	post(&queryParams)
+}
+
+func loadConfig(config *Config) {
+	file, _ := ioutil.ReadFile("./config.json")
+
+	json.Unmarshal(file, &config)
+}
+
+func loadDefaults(config *Config) {
+	if config.Webhook == "" {
+		fmt.Printf("Missing webhook url. You must include this in your config.json.")
+		os.Exit(1)
+	}
+
+	if config.Port == "" {
+		config.Port = "10333"
+	}
+
+	if config.SlackUser == "" {
+		config.SlackUser = "fogbugz"
+	}
+
+	if config.DefaultChannel == "" {
+		fmt.Printf("Missing default channel. You must include this in your config.json.")
+		os.Exit(1)
+	}
+}
+
+func setupServer() {
+	fmt.Printf("Listening to port: %s\n", config.Port)
+	http.HandleFunc("/", handler)
+	err := http.ListenAndServe(":"+config.Port, nil)
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		os.Exit(1)
+	}
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Printf("Usage: %s <slack-webhook-url>\n", os.Args[0])
-		fmt.Printf("e.g: %s https://company.slack.com/services/hooks/incoming-webhook?token=loremipsum\n", os.Args[0])
-		fmt.Printf("\nConfigure a fogbugz URL Trigger like to send on Case events to:\n")
-		fmt.Printf("http://your-proxy-host:10333//{CaseNumber}: {EventType} - {AssignedToName} - <http:/your-fogbugz-host/default.asp?{CaseNumber}|{Title}>\n")
-		return
-	}
-	webhookurl = os.Args[1]
-	port := ":10333"
-	fmt.Printf("Listening to port: %s\n", port)
-	http.HandleFunc("/", handler)
-	err := http.ListenAndServe(port, nil)
-	if err != nil {
-		fmt.Printf("%s\n", err)
-	}
+	loadConfig(&config)
+	loadDefaults(&config)
+	setupServer()
 }

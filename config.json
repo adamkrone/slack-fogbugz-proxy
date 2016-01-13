@@ -1,0 +1,9 @@
+{
+  "webhook": "http://webhook.goes/here",
+  "fogbugz_url": "http://your-fogbugz.url",
+  "default_channel": "#fogbugz",
+  "channel_mappings": {
+    "My Project": "#my-project",
+    "Another": "#another-channel"
+  }
+}
